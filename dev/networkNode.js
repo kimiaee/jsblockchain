@@ -44,6 +44,19 @@ app.post('/transaction/broadcast', function (req, res) {
     });
 });
 
+app.post('/receive-new-block', (req, res) => {
+    const newBlock = req.body.newBlock;
+    const lastBlock = coin.getLastBlock();
+    const correctHash = lastBlock.hash === newBlock.previousBlockHash;
+    const correctIndex = lastBlock.index + 1 === newBlock.index;
+    if (correctHash && correctIndex) {
+        coin.chain.push(newBlock);
+        coin.pendingTransactions = [];
+        res.json({note: "New block received and accepted!", newBlock})
+    } else {
+        res.json({note: "New block rejected!", newBlock})
+    }
+});
 
 app.post('/register-and-broadcast-node', function (req, res) {
     const newNodeUrl = req.body.newNodeUrl;
@@ -98,6 +111,44 @@ app.post('/register-nodes-bulk', function (req, res) {
     res.json({note: 'Bulk registration successful.'})
 });
 
+app.get('/consensus', function (req, res) {
+    const requestPromises = [];
+    coin.networkNodes.forEach((networkNodeUrl) => {
+        const requestOptions = {
+            uri: networkNodeUrl + '/blockchain',
+            method: 'GET',
+            json: true
+        };
+        requestPromises.push(rp(requestOptions));
+    });
+    Promise.all(requestPromises).then((blockchains) => {
+        const currentChainLength = coin.chain.length;
+        let maxChainLength = currentChainLength;
+        let newLongestChain = null;
+        let newPendingTransaction = null;
+
+        blockchains.forEach((blockchain) => {
+            if (blockchain.chain.length > maxChainLength) {
+                maxChainLength = blockchain.chain.length;
+                newLongestChain = blockchain.chain;
+                newPendingTransaction = blockchain.pendingTransactions;
+            }
+        })
+        if (!newLongestChain || (newLongestChain && !coin.chainIsValid(newLongestChain))) {
+            return res.json({note: 'Current chain has not been replaced!', chain: coin.chain});
+        } else { //else if (newLongestChain && coin.chainIsValid(newLongestChain))
+
+            coin.chain = newLongestChain;
+            coin.pendingTransactions = newPendingTransaction;
+            res.json({
+                note: "This chain has been replaced!",
+                chain: coin.chain
+            })
+
+        }
+    });
+});
+
 app.get('/mine', function (req, res) {
     const lastBlock = coin.getLastBlock();
     const previousBlockHash = lastBlock['hash'];
@@ -108,16 +159,70 @@ app.get('/mine', function (req, res) {
 
     const nonce = coin.proofOfWork(previousBlockHash, currenBlockData);
     const blockHash = coin.hashBlock(previousBlockHash, currenBlockData, nonce)
-    coin.createNewTransaction(12.5, "00", nodeAddress)
+
     const newBlock = coin.createNewBlock(nonce, previousBlockHash, blockHash)
-    res.json({
-        note: 'New Block Mined Successfully',
-        block: newBlock
+    const requestPromises = [];
+    coin.networkNodes.forEach((networkNodeUrl) => {
+        const requestOption = {
+            uri: networkNodeUrl + '/receive-new-block',
+            method: 'POST',
+            body: {newBlock},
+            json: true
+        };
+        requestPromises.push(rp(requestOption));
+    });
+    Promise.all(requestPromises).then(() => {
+        const requestOption = {
+            uri: coin.currentNodeUrl + '/transaction/broadcast',
+            method: "POST",
+            body: {
+                amount: 12.5,
+                sender: "00",
+                recipient: nodeAddress
+            },
+            json: true
+        };
+        return rp(requestOption);
+    }).then(() => {
+        res.json({
+            note: 'New block mined and broadcast successfully',
+            block: newBlock
+        });
     });
 });
 
 app.get('/', function (req, res) {
     res.send('welcome!!');
+});
+
+
+app.get('/block/:blockHash', function (req, res) {
+    // return res.json({hash: req.params.blockHash});
+
+    res.json({
+        block: coin.getBlock(req.params.blockHash)
+    });
+});
+
+app.get('/transaction/:transactionId', function (req, res) {
+    const transactionId = req.params.transactionId;
+    const transaction = coin.getTransaction(transactionId);
+    res.json({
+        transaction: transaction.transaction,
+        block: transaction.block,
+    })
+});
+
+app.get('/address/:address', function (req, res) {
+    const address = req.params.address;
+    const transactions = coin.getAddressData(address);
+    res.json({
+        addressData:transactions
+    })
+});
+
+app.get('/block-explorer', function (req, res) {
+    res.sendFile('./block-explorer/index.html', {root: __dirname});
 });
 
 app.listen(port, function () {
